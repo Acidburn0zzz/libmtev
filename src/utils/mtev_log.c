@@ -375,14 +375,27 @@ mtev_log_memory_lines_since(mtev_log_stream_t ls, uint64_t afterwhich,
 
 static mtev_hash_table mtev_loggers;
 static mtev_hash_table mtev_logops;
+static mtev_boolean logger_recursion = mtev_false;
 
 int mtev_log_global_enabled(void) {
   return LIBMTEV_LOG_ENABLED();
 }
 
-static mtev_boolean has_material_output(mtev_log_stream_t ls) {
+static mtev_boolean has_material_output(mtev_log_stream_t ls, mtev_hash_table *seen_in) {
   mtev_boolean state = mtev_false;
   struct _mtev_log_stream_outlet_list *node;
+  mtev_hash_table *seen = seen_in;
+
+  if(!seen_in) {
+    seen = calloc(1, sizeof(*seen));
+    mtev_hash_init(seen);
+  }
+
+  if(mtev_hash_store(seen, ls->name, strlen(ls->name), NULL) == mtev_false) {
+    /* recursion */
+    logger_recursion = mtev_true;
+    goto ret;
+  }
 
   if(!IS_ENABLED_ON(ls)) goto ret;
   if(ls->ops != NULL) {
@@ -391,7 +404,7 @@ static mtev_boolean has_material_output(mtev_log_stream_t ls) {
   }
 
   for(node = ls->outlets; node; node = node->next) {
-    if(has_material_output(node->outlet)) {
+    if(has_material_output(node->outlet, seen)) {
       state = mtev_true;
       goto ret;
     }
@@ -399,20 +412,34 @@ static mtev_boolean has_material_output(mtev_log_stream_t ls) {
 
  ret:
   debug_printf("has_material_output(%s) -> %s\n", ls->name, state ? "true" : "false");
+  if(!seen_in) {
+    mtev_hash_destroy(seen, NULL, NULL);
+    free(seen);
+  }
   return state;
 }
-static void materialize_deps(mtev_log_stream_t ls) {
+static void materialize_deps(mtev_log_stream_t ls, mtev_hash_table *seen_in) {
+  mtev_hash_table *seen = seen_in;
   struct _mtev_log_stream_outlet_list *node;
+  if(!seen) {
+    seen = calloc(1, sizeof(*seen));
+    mtev_hash_init(seen);
+  }
+  if(mtev_hash_store(seen, ls->name, strlen(ls->name), NULL) == mtev_false) {
+    debug_printf("recursive logging stanza: %s\n", ls->name);
+    logger_recursion = mtev_true;
+    goto leave;
+  }
   if(ls->deps_materialized) {
     debug_printf("materialize(%s) [already done]\n", ls->name);
-    return;
+    goto leave;
   }
   /* pass forward all but enabled */
   ls->flags_below |= (ls->flags & MTEV_LOG_STREAM_FEATURES);
 
   /* we might have children than need these */
   for(node = ls->outlets; node; node = node->next) {
-    materialize_deps(node->outlet);
+    materialize_deps(node->outlet, seen);
     /* our flags_below should be augmented by our outlets flags_below */
     ls->flags_below |= (~(ls->flags) & MTEV_LOG_STREAM_FEATURES) &
                        node->outlet->flags_below;
@@ -421,11 +448,18 @@ static void materialize_deps(mtev_log_stream_t ls) {
                  node->outlet->flags_below & MTEV_LOG_STREAM_FEATURES);
   }
 
-  if(has_material_output(ls)) ls->flags_below |= MTEV_LOG_STREAM_ENABLED;
+  if(has_material_output(ls, NULL)) ls->flags_below |= MTEV_LOG_STREAM_ENABLED;
   else ls->flags_below &= ~MTEV_LOG_STREAM_ENABLED;
 
   debug_printf("materialize(%s) -> %x\n", ls->name, ls->flags_below);
   ls->deps_materialized = 1;
+
+ leave:
+  if(seen_in == NULL) {
+    mtev_hash_destroy(seen, NULL, NULL);
+    free(seen);
+  }
+  return;
 }
 
 static void
@@ -445,10 +479,14 @@ mtev_log_materialize(void) {
   mtev_hash_iter iter = MTEV_HASH_ITER_ZERO;
   mtev_log_init_globals();
 
+  logger_recursion = mtev_false;
   while(mtev_hash_adv(&mtev_loggers, &iter)) {
     mtev_log_stream_t ls = iter.value.ptr;
     debug_printf("materializing(%s)\n", ls->name);
-    materialize_deps(ls);
+    materialize_deps(ls, NULL);
+  }
+  if(logger_recursion) {
+    mtevL(mtev_stderr, "Logger recursion detected, check your configuration.\n");
   }
 }
 
