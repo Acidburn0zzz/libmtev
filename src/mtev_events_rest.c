@@ -132,6 +132,7 @@ json_spit_jobq(eventer_jobq_t *jobq, void *closure) {
   MJ_KV(jo, "backlog", MJ_INT(jobq->backlog));
   MJ_KV(jo, "inflight", MJ_INT(jobq->inflight));
   MJ_KV(jo, "timeouts", MJ_INT64(jobq->timeouts));
+  MJ_KV(jo, "overflows", MJ_INT64(jobq->overflows));
   MJ_KV(jo, "avg_wait_ms", MJ_DOUBLE((double)jobq->avg_wait_ns/1000000.0));
   MJ_KV(jo, "avg_run_ms", MJ_DOUBLE((double)jobq->avg_run_ns/1000000.0));
 }

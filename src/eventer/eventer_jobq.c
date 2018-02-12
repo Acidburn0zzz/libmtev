@@ -62,6 +62,7 @@ eventer_jobq_queue_completion(eventer_job_t *job) {
   bool done;
 
   ck_pr_dec_32_zero(&job->dependents, &done);
+mtevL(mtev_error, "job %p %s\n", job->fd_event, done ? "done" : "waiting");
   if(done) {
     if(job->waiting)
       eventer_jobq_queue_completion(job->waiting);
@@ -291,6 +292,7 @@ eventer_jobq_create_internal(const char *queue_name, eventer_jobq_memory_safety_
     stats_rob_i32(jobq_ns, "desired_concurrency", (void *)&jobq->desired_concurrency);
     stats_rob_i32(jobq_ns, "backlog", (void *)&jobq->backlog);
     stats_rob_i64(jobq_ns, "timeouts", (void *)&jobq->timeouts);
+    stats_rob_i64(jobq_ns, "overflows", (void *)&jobq->overflows);
   }
   pthread_mutex_unlock(&all_queues_lock);
   return jobq;
@@ -376,6 +378,27 @@ eventer_jobq_maybe_spawn(eventer_jobq_t *jobq, int bump) {
   }
 }
 
+static void
+eventer_jobq_cleanup(eventer_jobq_t *jobq, eventer_job_t *job) {
+  uint64_t start, duration;
+  struct timeval diff;
+  job->finish_hrtime = mtev_gethrtime();
+  mtev_gettimeofday(&job->finish_time, NULL);
+  sub_timeval(job->finish_time, job->fd_event->whence, &diff);
+  LIBMTEV_EVENTER_CALLBACK_ENTRY((void *)job->fd_event,
+                       (void *)job->fd_event->callback, NULL,
+                       job->fd_event->fd, job->fd_event->mask,
+                       EVENTER_ASYNCH_CLEANUP);
+  start = mtev_gethrtime();
+  eventer_run_callback(job->fd_event, EVENTER_ASYNCH_CLEANUP,
+             job->fd_event->closure, &job->finish_time);
+  duration = mtev_gethrtime() - start;
+  LIBMTEV_EVENTER_CALLBACK_RETURN((void *)job->fd_event,
+                        (void *)job->fd_event->callback, NULL, -1);
+  stats_set_hist_intscale(eventer_callback_latency, duration, -9, 1);
+  stats_set_hist_intscale(eventer_latency_handle_for_callback(job->fd_event->callback), duration, -9, 1);
+}
+
 void
 eventer_jobq_enqueue(eventer_jobq_t *jobq, eventer_job_t *job, eventer_job_t *parent) {
   job->next = NULL;
@@ -384,16 +407,47 @@ eventer_jobq_enqueue(eventer_jobq_t *jobq, eventer_job_t *job, eventer_job_t *pa
     free(job);
     return;
   }
-  if(job->fd_event) {
-    ck_pr_inc_64(&jobq->total_jobs);
-    ck_pr_inc_32(&jobq->backlog);
-  }
+
   mtevL(eventer_deb, "jobq %p enqueue job [%p]\n", jobq, job);
 
-  /* If the parent is not NULL, setup a dependency */
-  if(parent) {
-    ck_pr_inc_32(&parent->dependents);
-    job->waiting = parent;
+  if(job->fd_event) {
+    ck_pr_inc_64(&jobq->total_jobs);
+
+    /* If the parent is not NULL, setup a dependency */
+    if(parent) {
+      ck_pr_inc_32(&parent->dependents);
+      job->waiting = parent;
+    }
+
+    if(jobq->backlog_limit > 0 && ck_pr_load_32(&jobq->backlog) > jobq->backlog_limit) {
+      mtevL(eventer_deb, "jobq %p overflow [%p]\n", jobq, job);
+      ck_pr_inc_64(&jobq->overflows);
+
+      /* Set the job up to "run" so it can "complete" correctly.
+       *   . assign squeue
+       *   . balance future inflight decrement (jobq and squeue)
+       *   . accommodate future dependent decrement
+       */
+      job->squeue = &jobq->queue;
+      ck_pr_inc_32(&jobq->inflight);
+      ck_pr_inc_32(&job->squeue->inflight);
+      ck_pr_inc_32(&job->dependents);
+
+      LIBMTEV_EVENTER_CALLBACK_ENTRY((void *)job->fd_event, (void *)job->fd_event->callback, NULL,
+                             job->fd_event->fd, job->fd_event->mask,
+                             EVENTER_ASYNCH_OVERFLOW);
+      eventer_set_this_event(job->fd_event);
+      eventer_run_callback(job->fd_event, EVENTER_ASYNCH_OVERFLOW,
+                           job->fd_event->closure, &job->finish_time);
+      eventer_set_this_event(NULL);
+      LIBMTEV_EVENTER_CALLBACK_RETURN((void *)job->fd_event, (void *)job->fd_event->callback, NULL, -1);
+
+      eventer_jobq_cleanup(jobq, job);
+      eventer_jobq_finished_job(jobq, job);
+      return;
+    }
+
+    ck_pr_inc_32(&jobq->backlog);
   }
 
   eventer_jobq_maybe_spawn(jobq, 1);
@@ -690,29 +744,13 @@ eventer_jobq_consumer(eventer_jobq_t *jobq) {
     /* Safely check and handle if we've timed out while in queue */
     pthread_mutex_lock(&job->lock);
     if(job->timeout_triggered) {
-      uint64_t start, duration;
-      struct timeval diff;
       /* This happens if the timeout occurred before we even had the change
        * to pull the job off the queue.  We must be in bad shape here.
        */
       if(ck_pr_cas_32(&job->has_cleanedup, 0, 1)) {
         mtevL(eventer_deb, "%p jobq[%s] -> timeout before start [%p]\n",
               pthread_self_ptr(), jobq->queue_name, job);
-        job->finish_hrtime = mtev_gethrtime();
-        mtev_gettimeofday(&job->finish_time, NULL);
-        sub_timeval(job->finish_time, job->fd_event->whence, &diff);
-        LIBMTEV_EVENTER_CALLBACK_ENTRY((void *)job->fd_event,
-                             (void *)job->fd_event->callback, NULL,
-                             job->fd_event->fd, job->fd_event->mask,
-                             EVENTER_ASYNCH_CLEANUP);
-        start = mtev_gethrtime();
-        eventer_run_callback(job->fd_event, EVENTER_ASYNCH_CLEANUP,
-                   job->fd_event->closure, &job->finish_time);
-        duration = mtev_gethrtime() - start;
-        LIBMTEV_EVENTER_CALLBACK_RETURN((void *)job->fd_event,
-                              (void *)job->fd_event->callback, NULL, -1);
-        stats_set_hist_intscale(eventer_callback_latency, duration, -9, 1);
-        stats_set_hist_intscale(eventer_latency_handle_for_callback(job->fd_event->callback), duration, -9, 1);
+        eventer_jobq_cleanup(jobq, job);
         eventer_jobq_finished_job(jobq, job);
         pthread_mutex_unlock(&job->lock);
         continue;
@@ -838,6 +876,10 @@ static void jobq_fire_blanks(eventer_jobq_t *jobq, int n) {
 
 void eventer_jobq_ping(eventer_jobq_t *jobq) {
   jobq_fire_blanks(jobq, 1);
+}
+
+void eventer_jobq_set_max_backlog(eventer_jobq_t *jobq, uint32_t max) {
+  jobq->backlog_limit = max;
 }
 
 void eventer_jobq_set_min_max(eventer_jobq_t *jobq, uint32_t min, uint32_t max) {

@@ -47,7 +47,10 @@
 #define EVENTER_TIMER            0x08
 #define EVENTER_ASYNCH_WORK      0x10
 #define EVENTER_ASYNCH_CLEANUP   0x20
+/* These ASYNCH and ASYNCH_COMPLETE must always match */
 #define EVENTER_ASYNCH           (EVENTER_ASYNCH_WORK | EVENTER_ASYNCH_CLEANUP)
+#define EVENTER_ASYNCH_COMPLETE  (EVENTER_ASYNCH_WORK | EVENTER_ASYNCH_CLEANUP)
+#define EVENTER_ASYNCH_OVERFLOW  0x40
 #define EVENTER_RECURRENT        0x80
 #define EVENTER_EVIL_BRUTAL     0x100
 #define EVENTER_CANCEL_DEFERRED 0x200
@@ -445,7 +448,8 @@ API_EXPORT(eventer_t) eventer_alloc_asynch(eventer_func_t, void *);
     guarantees on enforcing the deadline; this is more of a guideline for
     the schedule and the job could be aborted (where the `EVENTER_ASYNCH_WORK`
     phase is not finished or even started, but the `EVENTER_ASYNCH_CLEANUP`
-    will be called).
+    will be called).  If the a backlog limit is set, `EVENTER_ASYNCH_OVERFLOW`
+    may be called instead of `EVENTER_ASYNCH_WORK` (cleanup will still be performed).
 */
 API_EXPORT(eventer_t) eventer_alloc_asynch_timeout(eventer_func_t, void *, struct timeval *);
 

@@ -101,6 +101,7 @@ mtev_console_spit_jobq(eventer_jobq_t *jobq, void *c) {
   nc_printf(ncct, " backlog: %d\n", jobq->backlog);
   nc_printf(ncct, " inflight: %d\n", jobq->inflight);
   nc_printf(ncct, " timeouts: %lld\n", (long long int)jobq->timeouts);
+  nc_printf(ncct, " overflows: %lld\n", (long long int)jobq->overflows);
   nc_printf(ncct, " avg_wait_ms: %f\n", (double)jobq->avg_wait_ns/1000000.0);
   nc_printf(ncct, " avg_run_ms: %f\n", (double)jobq->avg_run_ns/1000000.0);
 }

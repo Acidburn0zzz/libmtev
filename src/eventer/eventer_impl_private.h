@@ -113,6 +113,7 @@ struct _eventer_jobq_t {
   uint32_t                inflight;
   uint64_t                total_jobs;
   uint64_t                timeouts;
+  uint64_t                overflows;
   uint64_t                avg_wait_ns; /* smoother alpha = 0.8 */
   uint64_t                avg_run_ns; /* smoother alpha = 0.8 */
   stats_handle_t         *wait_latency;
@@ -121,6 +122,7 @@ struct _eventer_jobq_t {
   mtev_boolean            isbackq;
   uint32_t                min_concurrency;
   uint32_t                max_concurrency;
+  uint32_t                backlog_limit;
 };
 
 #ifdef LOCAL_EVENTER
