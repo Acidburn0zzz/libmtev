@@ -4,6 +4,12 @@
 
 ## 1.2
 
+### 1.2.8
+
+ * Add lua function mtev.timezone
+ * Explicitly alter umask for mkstemp
+ * Fixes some issues identified by covertry
+
 ### 1.2.7
 
  * Add lua functions mtev.log_enabled(), mtev.cluster()
